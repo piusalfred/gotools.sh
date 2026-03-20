@@ -1,4 +1,24 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Pius Alfred
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 set -euo pipefail
 TOOLS_DIR="${TOOLS_DIR:-$PWD/tools}"
 
@@ -18,7 +38,7 @@ usage() {
 Usage: $(basename "$0") <command> [arguments]
 
 Commands:
-  init    [name] <pkg> [ver]    Initialize a new tool. If name is omitted, it is
+  install [name] <pkg> [ver]    Install a new tool. If name is omitted, it is
                                 inferred from the package path. Defaults to @latest.
   sync                          Sync all tools to the project's Go version and download deps.
   upgrade <name1> [name2...]    Update specific tools to @latest. Use 'all' for everything.
@@ -27,8 +47,8 @@ Commands:
   remove  <name1> [name2...]    Remove tool .mod and .sum files.
 
 Examples:
-  ./gotools.sh init github.com/google/addlicense
-  ./gotools.sh init task github.com/go-task/task/v3/cmd/task v3.35.0
+  ./gotools.sh install github.com/google/addlicense
+  ./gotools.sh install task github.com/go-task/task/v3/cmd/task v3.35.0
   ./gotools.sh upgrade all
   ./gotools.sh exec task --version
 EOF
@@ -65,22 +85,22 @@ extract_version() {
 
 # --- Command Implementations ---
 
-cmd_init() {
+cmd_install() {
     local tool_name=""
     local package=""
     local version="latest"
 
     # Smart Argument Parsing for DevEx
     if [[ $# -eq 1 ]]; then
-        # Case: ./gotools.sh init <package>
+        # Case: ./gotools.sh install <package>
         package="$1"
         tool_name=$(get_default_name "$package")
     elif [[ $# -eq 2 ]]; then
-        # Case: ./gotools.sh init <name> <package>
+        # Case: ./gotools.sh install <name> <package>
         tool_name="$1"
         package="$2"
     elif [[ $# -ge 3 ]]; then
-        # Case: ./gotools.sh init <name> <package> <version>
+        # Case: ./gotools.sh install <name> <package> <version>
         tool_name="$1"
         package="$2"
         version="$3"
@@ -95,7 +115,7 @@ cmd_init() {
 
     local go_ver; go_ver="$(resolve_go_version)"
 
-    echo "📦 Initializing ${tool_name} from ${package}@${version} (Go ${go_ver})..."
+    echo "📦 Installing ${tool_name} from ${package}@${version} (Go ${go_ver})..."
 
     # Create the isolated mod file
     cat > "$mod_file" <<MOD
@@ -158,7 +178,7 @@ cmd_exec() {
     local tool_name="${1:?tool-name is required}"
     shift
     local mod_file="${TOOLS_DIR}/${tool_name}.mod"
-    [[ ! -f "$mod_file" ]] && { echo "❌ Error: Tool '${tool_name}' not found. Run 'init' first." >&2; exit 1; }
+    [[ ! -f "$mod_file" ]] && { echo "❌ Error: Tool '${tool_name}' not found. Run 'install' first." >&2; exit 1; }
 
     # Run tool using its isolated modfile context
     exec go tool -modfile="$mod_file" "$tool_name" "$@"
@@ -185,7 +205,7 @@ cmd_list() {
 command="$1"; shift
 
 case "$command" in
-    init)    cmd_init "$@" ;;
+    install) cmd_install "$@" ;;
     sync)    cmd_sync ;;
     upgrade) cmd_upgrade "$@" ;;
     update)  cmd_upgrade "$@" ;;

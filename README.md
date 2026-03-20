@@ -9,7 +9,7 @@ A script to manage Go build tools (like `golangci-lint`, `task`, or `mockgen`) u
 * **Strict Isolation:** Every tool has its own `go.mod` and `go.sum` file.
 * **Go Version Parity:** Tool environments automatically sync to the Go version defined in your project's root `go.mod`.
 * **Reproducibility:** Committing the `tools/` directory guarantees the exact same tool versions are used locally and in CI.
-* **Smart Initialization:** Automatically infers the tool name from the package path.
+* **Smart Install:** Automatically infers the tool name from the package path.
 
 ## Requirements
 
@@ -29,7 +29,7 @@ chmod +x gotools.sh
 
 | Command | Description |
 | :--- | :--- |
-| `init [name] <pkg> [ver]` | Initialize a tool. If `name` is omitted, it is inferred from the package path. |
+| `install [name] <pkg> [ver]` | Install a tool. If `name` is omitted, it is inferred from the package path. |
 | `exec <name> [args]` | Run a tool within its isolated module context. |
 | `sync` | Sync all tool `.mod` files to the project's Go version and download dependencies. |
 | `upgrade <name> \| all` | Upgrade a specific tool, or all tools, to `@latest`. |
@@ -38,13 +38,13 @@ chmod +x gotools.sh
 
 ### Examples
 
-**Initialize tools:**
+**Install tools:**
 ```bash
 # Inferred name: creates tools/addlicense.mod
-./gotools.sh init github.com/google/addlicense
+./gotools.sh install github.com/google/addlicense
 
 # Explicit name and version: creates tools/task.mod
-./gotools.sh init task github.com/go-task/task/v3/cmd/task v3.35.0
+./gotools.sh install task github.com/go-task/task/v3/cmd/task v3.35.0
 ```
 
 **Execute a tool:**
