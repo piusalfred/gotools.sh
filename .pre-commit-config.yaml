@@ -29,6 +29,11 @@ repos:
           - id: addlicense
             name: addlicense
             language: system
-            entry: ./gotools.sh exec addlicense -check -l mit -c "Pius Alfred" -ignore "tools/**" -ignore ".idea/**" -ignore ".gitignore" .
+            entry: ./gotools.sh exec addlicense -check -l mit -c "Pius Alfred" -ignore "tools/**" -ignore ".idea/**" -ignore ".gitignore" -ignore "go.work" .
             pass_filenames: false
             always_run: true
+    - repo: https://github.com/rvben/rumdl-pre-commit
+      rev: v0.1.58
+      hooks:
+          - id: rumdl # Lint only (fails on issues)
+          - id: rumdl-fmt
