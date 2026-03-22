@@ -1,0 +1,62 @@
+# Copyright (c) 2026 Pius Alfred
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+name: Version Guard
+
+on:
+    pull_request:
+        paths:
+            - "gotools.sh"
+
+jobs:
+    check-version:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Verify Version Increment
+              run: |
+                  # 1. Extract versions
+                  NEW_VERSION=$(grep '^VERSION=' gotools.sh | cut -d'"' -f2)
+                  OLD_VERSION=$(git show origin/${{ github.base_ref }}:gotools.sh | grep '^VERSION=' | cut -d'"' -f2)
+
+                  echo "Old version: $OLD_VERSION"
+                  echo "New version: $NEW_VERSION"
+
+                  # 2. Check if they are identical
+                  if [ "$NEW_VERSION" == "$OLD_VERSION" ]; then
+                    echo "❌ ERROR: gotools.sh was modified, but the VERSION ($NEW_VERSION) was not incremented."
+                    exit 1
+                  fi
+
+                  # 3. Use 'sort -V' to determine if NEW_VERSION is actually the higher one
+                  # sort -V puts the smallest version first.
+                  # If the first line of the sorted list is NOT the OLD_VERSION, it means the NEW_VERSION is smaller.
+                  HIGHEST=$(printf "%s\n%s" "$OLD_VERSION" "$NEW_VERSION" | sort -V | tail -n 1)
+
+                  if [ "$HIGHEST" != "$NEW_VERSION" ]; then
+                    echo "❌ ERROR: Version downgrade detected! $NEW_VERSION is lower than $OLD_VERSION."
+                    exit 1
+                  fi
+
+                  echo "✅ Version successfully incremented to $NEW_VERSION"

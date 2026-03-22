@@ -21,8 +21,36 @@
 
 set -euo pipefail
 
-REPO_URL="https://raw.githubusercontent.com/piusalfred/gotools.sh/main/gotools.sh"
+REPO="piusalfred/gotools.sh"
 BINARY_NAME="gotools.sh"
+
+resolve_version() {
+    local requested="${VERSION:-latest}"
+
+    if [[ "$requested" == "latest" ]]; then
+        # Fetch the latest release tag from the GitHub API
+        local tag
+        tag=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+            | grep '"tag_name"' \
+            | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')
+
+        if [[ -z "$tag" ]]; then
+            echo "⚠️  Could not determine latest release, falling back to main branch." >&2
+            echo "main"
+            return
+        fi
+
+        echo "$tag"
+        return
+    fi
+
+    # Normalise: accept both "v0.0.10" and "0.0.10"
+    if [[ "$requested" != v* ]]; then
+        requested="v${requested}"
+    fi
+
+    echo "$requested"
+}
 
 detect_gobin() {
     # 1. GOBIN env var (highest priority)
@@ -54,15 +82,26 @@ detect_gobin() {
 }
 
 main() {
+    local version
+    version=$(resolve_version)
+
+    local download_url="https://raw.githubusercontent.com/${REPO}/${version}/${BINARY_NAME}"
+
     local install_dir
     install_dir=$(detect_gobin)
 
     echo "📍 Detected Go bin directory: ${install_dir}"
+    echo "📦 Version: ${version}"
 
     mkdir -p "$install_dir"
 
-    echo "⬇️  Downloading ${BINARY_NAME}..."
-    curl -fsSL "$REPO_URL" -o "${install_dir}/${BINARY_NAME}"
+    echo "⬇️  Downloading ${BINARY_NAME} (${version})..."
+    if ! curl -fsSL "$download_url" -o "${install_dir}/${BINARY_NAME}"; then
+        echo "❌ Download failed. Check that version '${version}' exists at:" >&2
+        echo "   https://github.com/${REPO}/releases" >&2
+        exit 1
+    fi
+
     chmod +x "${install_dir}/${BINARY_NAME}"
 
     echo "✅ Installed ${BINARY_NAME} to ${install_dir}/${BINARY_NAME}"
