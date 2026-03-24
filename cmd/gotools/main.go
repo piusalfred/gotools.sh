@@ -38,12 +38,7 @@ func main() {
 	defer cancel()
 
 	if err := Run(ctx, os.Args); err != nil {
-		// If the context was cancelled due to a signal, exit with the
-		// conventional 128+signal code so callers (scripts, CI, etc.)
-		// can distinguish a signal-killed process from a regular failure.
 		if ctx.Err() != nil {
-			// Determine which signal fired. Default to SIGINT if we
-			// cannot tell — this matches the common Ctrl-C case.
 			code := 128 + int(syscall.SIGINT)
 
 			var exitErr *exec.ExitError
@@ -54,7 +49,6 @@ func main() {
 			os.Exit(code)
 		}
 
-		// Propagate the child's exit code when available.
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			os.Exit(exitErr.ExitCode())
@@ -65,9 +59,13 @@ func main() {
 	}
 }
 
-// Run executes the embedded gotools.sh script with the supplied arguments.
-// The context controls the lifetime of the child process: cancelling it
-// sends SIGKILL to the process group (the default CommandContext behaviour).
+// Run executes the embedded gotools.sh script in a child bash process.
+//
+// Signal handling: the child is placed in its own process group (Setpgid)
+// so kernel-delivered signals don't race with our context cancellation.
+// On context cancel the Cancel func sends SIGTERM to the whole process
+// group, giving the shell script up to WaitDelay (5 s) to clean up
+// before Go escalates to SIGKILL.
 func Run(ctx context.Context, args []string) error {
 	script := []string{"-c", gotools.SCRIPT, "gotools"}
 	if len(args) > 1 {
@@ -78,29 +76,14 @@ func Run(ctx context.Context, args []string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
-
-	// Put the child in its own process group so that signals sent to the
-	// gotools binary are not automatically forwarded by the kernel. We
-	// handle cancellation through the context instead, which gives us a
-	// chance to exit cleanly.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	// When the context is cancelled, send SIGTERM first so the shell
-	// script (and any children it spawned) can clean up before we
-	// escalate to SIGKILL after the grace period.
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil
 		}
-
-		// Signal the entire process group (negative PID).
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 	}
-
-	// Give the child process a grace period to handle SIGTERM and shut
-	// down cleanly. If it is still running after WaitDelay, Go will
-	// send SIGKILL to force-terminate it.
-	cmd.WaitDelay = 5 * time.Second
 
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("execution failed: %w", err)
