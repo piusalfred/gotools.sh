@@ -251,7 +251,8 @@ tools/
 | `exec <name> [args]` | Run a managed tool. |
 | `sync` | Sync state to `.gotools.env`. |
 | `upgrade <name\|all>` | Upgrade tools to `@latest`. |
-| `list` | List all managed tools. |
+| `list` | List all managed tools with Go version and modfile path. |
+| `info <name>` | Show detailed information about a specific tool. |
 | `remove <name...>` | Remove specific tools. |
 | `migrate <strategy>` | Migrate to a different strategy. |
 | `config [key [value]]` | View or edit config. |
@@ -347,6 +348,26 @@ tools/
 ./gotools.sh config GOTOOLS_STRATEGY module
 ./gotools.sh config GOTOOLS_MODULE_PREFIX \
   github.com/myorg/myrepo
+```
+
+**List tools and inspect details:**
+
+```bash
+# List all managed tools (shows Go version and modfile path)
+./gotools.sh list
+#   TOOL               STRATEGY   GO       MODFILE                        PACKAGE@VERSION
+#   ----               --------   --       -------                        ---------------
+#   addlicense         isolated   1.24     tools/addlicense.mod           github.com/google/addlicense@v1.2.0
+#   golangci-lint      isolated   1.24     tools/golangci-lint.mod        github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4
+
+# Get detailed info about a specific tool
+./gotools.sh info addlicense
+#   Tool:       addlicense
+#   Package:    github.com/google/addlicense
+#   Version:    v1.2.0
+#   Go:         1.24
+#   Strategy:   isolated
+#   Modfile:    tools/addlicense.mod
 ```
 
 **Version and self-update:**

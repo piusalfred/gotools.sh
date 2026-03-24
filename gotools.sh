@@ -44,9 +44,11 @@ Commands:
                             One arg: show value of <key>.
                             Two args: set <key>=<value>.
   purge                   Remove all tools and the .gotools.env file.
+  info <name>             Show detailed information about a specific tool.
   version                 Show script version.
   self-update             Update gotools.sh to the latest version.
   uninstall               Remove this script from your system.
+  test <seconds>          Sleep for <seconds> (useful for testing Ctrl-C / signal handling).
 
 Strategies:
   workspace   One shared tools/go.mod with all tool directives.
@@ -74,15 +76,25 @@ EOF
 # Config helpers
 # ---------------------------------------------------------------------------
 load_config() {
+    # Save any pre-existing environment variables so they take precedence
+    # over values in the config file.
+    local env_strategy="${GOTOOLS_STRATEGY:-}"
+    local env_dir="${GOTOOLS_DIR:-}"
+    local env_go_version="${GOTOOLS_GO_VERSION:-}"
+    local env_use_work="${GOTOOLS_USE_WORK:-}"
+    local env_module_prefix="${GOTOOLS_MODULE_PREFIX:-}"
+
     if [[ -f "$ENV_FILE" ]]; then
         # shellcheck source=/dev/null
         source "$ENV_FILE"
     fi
-    GOTOOLS_STRATEGY="${GOTOOLS_STRATEGY:-$DEFAULT_STRATEGY}"
-    GOTOOLS_DIR="${GOTOOLS_DIR:-$DEFAULT_DIR}"
-    GOTOOLS_GO_VERSION="${GOTOOLS_GO_VERSION:-$DEFAULT_GO_VERSION}"
-    GOTOOLS_USE_WORK="${GOTOOLS_USE_WORK:-$DEFAULT_USE_WORK}"
-    GOTOOLS_MODULE_PREFIX="${GOTOOLS_MODULE_PREFIX:-$DEFAULT_MODULE_PREFIX}"
+
+    # Environment variables override config file, which overrides defaults.
+    GOTOOLS_STRATEGY="${env_strategy:-${GOTOOLS_STRATEGY:-$DEFAULT_STRATEGY}}"
+    GOTOOLS_DIR="${env_dir:-${GOTOOLS_DIR:-$DEFAULT_DIR}}"
+    GOTOOLS_GO_VERSION="${env_go_version:-${GOTOOLS_GO_VERSION:-$DEFAULT_GO_VERSION}}"
+    GOTOOLS_USE_WORK="${env_use_work:-${GOTOOLS_USE_WORK:-$DEFAULT_USE_WORK}}"
+    GOTOOLS_MODULE_PREFIX="${env_module_prefix:-${GOTOOLS_MODULE_PREFIX:-$DEFAULT_MODULE_PREFIX}}"
 }
 
 resolve_go_version() {
@@ -162,6 +174,58 @@ tool_module_path() {
 
 # ---------------------------------------------------------------------------
 # Parsing helpers for go.mod files
+#
+# extract_go_version_from_mod <modfile>
+#   Prints the Go version from the `go` directive in a go.mod file.
+extract_go_version_from_mod() {
+    local modfile="$1"
+    awk '$1 == "go" { print $2; exit }' "$modfile"
+}
+
+# relative_path <absolute_or_relative>
+#   Prints the path relative to the current working directory.
+#   Pure-bash implementation — no python3 or GNU realpath required.
+relative_path() {
+    local target="$1"
+
+    # If already relative and doesn't need resolving, just clean it up.
+    # Convert to absolute so the algorithm below always works.
+    [[ "$target" != /* ]] && target="$PWD/$target"
+
+    # Normalise both paths: resolve /./, remove trailing slashes,
+    # collapse repeated slashes.  We avoid readlink/realpath so this
+    # works on macOS and Linux without extra tools.
+    local abs_target abs_base
+    abs_target=$(cd "$(dirname "$target")" 2>/dev/null && echo "$PWD/$(basename "$target")") \
+        || { echo "$1"; return; }
+    abs_base="$PWD"
+
+    # Split into arrays on '/'.
+    local IFS='/'
+    read -ra t_parts <<< "$abs_target"
+    read -ra b_parts <<< "$abs_base"
+
+    # Find the length of the common prefix.
+    local i=0
+    while [[ $i -lt ${#t_parts[@]} && $i -lt ${#b_parts[@]} && "${t_parts[$i]}" == "${b_parts[$i]}" ]]; do
+        (( i++ ))
+    done
+
+    # Build the relative path: one ".." for each remaining base component,
+    # then append the remaining target components.
+    local rel=""
+    local j
+    for (( j=i; j<${#b_parts[@]}; j++ )); do
+        rel="${rel}../"
+    done
+    for (( j=i; j<${#t_parts[@]}; j++ )); do
+        rel="${rel}${t_parts[$j]}/"
+    done
+
+    # Strip trailing slash, default to "." for identical paths.
+    rel="${rel%/}"
+    echo "${rel:-.}"
+}
 # ---------------------------------------------------------------------------
 
 # extract_tools_from_mod <modfile>
@@ -513,19 +577,22 @@ cmd_exec() {
 # ---- list ----------------------------------------------------------------
 cmd_list() {
     load_config
-    printf "  %-22s %-12s %s\n" "TOOL" "STRATEGY" "PACKAGE@VERSION"
-    printf "  %-22s %-12s %s\n" "----" "--------" "---------------"
+    printf "  %-18s %-10s %-8s %-30s %s\n" "TOOL" "STRATEGY" "GO" "MODFILE" "PACKAGE@VERSION"
+    printf "  %-18s %-10s %-8s %-30s %s\n" "----" "--------" "--" "-------" "---------------"
 
     case "$GOTOOLS_STRATEGY" in
         workspace)
             local modfile="$GOTOOLS_DIR/go.mod"
             if [[ -f "$modfile" ]]; then
+                local go_ver rel_mod
+                go_ver=$(extract_go_version_from_mod "$modfile")
+                rel_mod=$(relative_path "$modfile")
                 while IFS= read -r pkg; do
                     [[ -z "$pkg" ]] && continue
                     local name ver
                     name=$(basename "$pkg")
                     ver=$(extract_version_for_pkg "$modfile" "$pkg")
-                    printf "  %-22s %-12s %s\n" "$name" "workspace" "${pkg}@${ver:-unknown}"
+                    printf "  %-18s %-10s %-8s %-30s %s\n" "$name" "workspace" "${go_ver:-?}" "$rel_mod" "${pkg}@${ver:-unknown}"
                 done < <(extract_tools_from_mod "$modfile")
             fi
             ;;
@@ -533,12 +600,14 @@ cmd_list() {
         isolated)
             for f in "$GOTOOLS_DIR"/*.mod; do
                 [[ -f "$f" ]] || continue
-                local name pkg ver
+                local name pkg ver go_ver rel_mod
                 name=$(basename "$f" .mod)
                 pkg=$(extract_pkg_from_mod "$f")
                 [[ -z "$pkg" ]] && continue
                 ver=$(extract_version_for_pkg "$f" "$pkg")
-                printf "  %-22s %-12s %s\n" "$name" "isolated" "${pkg}@${ver:-unknown}"
+                go_ver=$(extract_go_version_from_mod "$f")
+                rel_mod=$(relative_path "$f")
+                printf "  %-18s %-10s %-8s %-30s %s\n" "$name" "isolated" "${go_ver:-?}" "$rel_mod" "${pkg}@${ver:-unknown}"
             done
             ;;
 
@@ -547,12 +616,14 @@ cmd_list() {
                 [[ -d "$d" ]] || continue
                 local modfile="$d/go.mod"
                 [[ -f "$modfile" ]] || continue
-                local name pkg ver
+                local name pkg ver go_ver rel_mod
                 name=$(basename "$d")
                 pkg=$(extract_pkg_from_mod "$modfile")
                 [[ -z "$pkg" ]] && continue
                 ver=$(extract_version_for_pkg "$modfile" "$pkg")
-                printf "  %-22s %-12s %s\n" "$name" "module" "${pkg}@${ver:-unknown}"
+                go_ver=$(extract_go_version_from_mod "$modfile")
+                rel_mod=$(relative_path "$modfile")
+                printf "  %-18s %-10s %-8s %-30s %s\n" "$name" "module" "${go_ver:-?}" "$rel_mod" "${pkg}@${ver:-unknown}"
             done
             ;;
 
@@ -561,6 +632,80 @@ cmd_list() {
             exit 1
             ;;
     esac
+}
+
+# ---- info ----------------------------------------------------------------
+cmd_info() {
+    load_config
+    if [[ $# -eq 0 ]]; then
+        echo "❌ Usage: $(basename "$0") info <tool-name>" >&2
+        exit 1
+    fi
+
+    local tool_name="$1"
+    local modfile="" pkg="" ver="" go_ver="" strategy="$GOTOOLS_STRATEGY"
+
+    case "$GOTOOLS_STRATEGY" in
+        workspace)
+            modfile="$GOTOOLS_DIR/go.mod"
+            if [[ ! -f "$modfile" ]]; then
+                echo "❌ No $modfile found. Run 'init' first." >&2
+                exit 1
+            fi
+            # Find the package whose basename matches the tool name.
+            pkg=$(extract_tools_from_mod "$modfile" | while IFS= read -r p; do
+                if [[ "$(basename "$p")" == "$tool_name" ]]; then
+                    echo "$p"
+                    break
+                fi
+            done)
+            if [[ -z "$pkg" ]]; then
+                echo "❌ Tool '$tool_name' not found in $modfile." >&2
+                exit 1
+            fi
+            ver=$(extract_version_for_pkg "$modfile" "$pkg")
+            go_ver=$(extract_go_version_from_mod "$modfile")
+            ;;
+
+        isolated)
+            modfile="$GOTOOLS_DIR/${tool_name}.mod"
+            if [[ ! -f "$modfile" ]]; then
+                echo "❌ Tool '$tool_name' not found ($modfile missing)." >&2
+                exit 1
+            fi
+            pkg=$(extract_pkg_from_mod "$modfile")
+            ver=$(extract_version_for_pkg "$modfile" "$pkg")
+            go_ver=$(extract_go_version_from_mod "$modfile")
+            ;;
+
+        module)
+            modfile="$GOTOOLS_DIR/$tool_name/go.mod"
+            if [[ ! -f "$modfile" ]]; then
+                echo "❌ Tool '$tool_name' not found ($modfile missing)." >&2
+                exit 1
+            fi
+            pkg=$(extract_pkg_from_mod "$modfile")
+            ver=$(extract_version_for_pkg "$modfile" "$pkg")
+            go_ver=$(extract_go_version_from_mod "$modfile")
+            ;;
+
+        *)
+            echo "❌ Unknown strategy: $GOTOOLS_STRATEGY" >&2
+            exit 1
+            ;;
+    esac
+
+    local rel_mod
+    rel_mod=$(relative_path "$modfile")
+
+    echo ""
+    echo "  Tool:       $tool_name"
+    echo "  Package:    ${pkg:-unknown}"
+    echo "  Version:    ${ver:-unknown}"
+    echo "  Go:         ${go_ver:-unknown}"
+    echo "  Strategy:   $strategy"
+    echo "  Modfile:    $rel_mod"
+    echo ""
 }
 
 # ---- upgrade -------------------------------------------------------------
@@ -932,6 +1077,39 @@ cmd_self_update() {
     fi
 }
 
+# ---- test (signal / cancellation helper) ---------------------------------
+cmd_test() {
+    if [[ $# -eq 0 ]]; then
+        echo "❌ Usage: $(basename "$0") test <seconds>" >&2
+        exit 1
+    fi
+
+    local seconds="$1"
+
+    # Validate that the argument is a positive number.
+    if ! [[ "$seconds" =~ ^[0-9]+(\.[0-9]+)?$ ]] || [[ "$seconds" == "0" ]]; then
+        echo "❌ Error: <seconds> must be a positive number, got '$seconds'" >&2
+        exit 1
+    fi
+
+    # Trap SIGINT and SIGTERM so we can report the signal before exiting.
+    trap 'echo ""; echo "⚡ Caught SIGINT (Ctrl-C) — exiting."; exit 130' INT
+    trap 'echo ""; echo "⚡ Caught SIGTERM — exiting."; exit 143' TERM
+
+    echo "⏳ Sleeping for ${seconds}s — press Ctrl-C to test signal handling..."
+
+    local elapsed=0
+    while (( $(echo "$elapsed < $seconds" | bc -l) )); do
+        sleep 1 &
+        wait $! 2>/dev/null || true  # wait on bg sleep so traps fire immediately
+        elapsed=$(echo "$elapsed + 1" | bc -l)
+        printf "\r  ⏱  %g / %s seconds" "$elapsed" "$seconds"
+    done
+
+    echo ""
+    echo "✅ Finished — no interruption."
+}
+
 # ---------------------------------------------------------------------------
 # Main dispatch
 # ---------------------------------------------------------------------------
@@ -947,12 +1125,14 @@ case "$action" in
     list)                   cmd_list ;;
     upgrade|update)         cmd_upgrade "$@" ;;
     remove)                 cmd_remove "$@" ;;
+    info)                   cmd_info "$@" ;;
     migrate)                cmd_migrate "$@" ;;
     config)                 cmd_config "$@" ;;
     purge)                  cmd_purge ;;
     version)                cmd_version ;;
     self-update|self-upgrade) cmd_self_update ;;
     uninstall)              cmd_uninstall ;;
+    test)                   cmd_test "$@" ;;
     help|--help|-h)         usage ;;
     *)                      echo "❌ Unknown command: $action" >&2; usage ;;
 esac
