@@ -60,18 +60,18 @@ Strategies:
   module      Dedicated subdirectories: tools/<name>/go.mod per tool.
 
 Examples:
-  ./gotools.sh init --strategy=module --dir=tools
-  ./gotools.sh install staticcheck honnef.co/go/tools/cmd/staticcheck@latest
-  ./gotools.sh install golang.org/x/tools/cmd/goimports@latest
-  ./gotools.sh exec goimports -w .
-  ./gotools.sh migrate unified
-  ./gotools.sh upgrade all
-  ./gotools.sh remove staticcheck goimports
-  ./gotools.sh config
-  ./gotools.sh config GOTOOLS_STRATEGY
-  ./gotools.sh config GOTOOLS_STRATEGY module
-  ./gotools.sh purge
-  ./gotools.sh uninstall
+  gotools.sh init --strategy=module --dir=tools
+  gotools.sh install staticcheck honnef.co/go/tools/cmd/staticcheck@latest
+  gotools.sh install golang.org/x/tools/cmd/goimports@latest
+  gotools.sh exec goimports -w .
+  gotools.sh migrate unified
+  gotools.sh upgrade all
+  gotools.sh remove staticcheck goimports
+  gotools.sh config
+  gotools.sh config GOTOOLS_STRATEGY
+  gotools.sh config GOTOOLS_STRATEGY module
+  gotools.sh purge
+  gotools.sh uninstall
 EOF
     exit 1
 }
