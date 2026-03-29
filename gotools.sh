@@ -4,17 +4,24 @@
 
 set -euo pipefail
 
-VERSION="v0.2.0"
+VERSION="v0.2.1"
 REPO="piusalfred/gotools.sh"
 API_URL="https://api.github.com/repos/$REPO/releases/latest"
 
 ENV_FILE=".gotools.env"
-DEFAULT_STRATEGY="isolated"
+DEFAULT_STRATEGY="split"
 DEFAULT_DIR="tools"
 DEFAULT_GO_VERSION="inherit"
-DEFAULT_USE_WORK="false"
 DEFAULT_MODULE_PREFIX=""
 
+# Capture the original environment once at startup, before any load_config
+# call sets these variables in the current shell. This is the only reliable
+# way to distinguish "user passed GOTOOLS_DIR=x ./gotools ..." from
+# "load_config already ran and set GOTOOLS_DIR earlier in this process".
+_ORIG_ENV_STRATEGY="${GOTOOLS_STRATEGY:-}"
+_ORIG_ENV_DIR="${GOTOOLS_DIR:-}"
+_ORIG_ENV_GO_VERSION="${GOTOOLS_GO_VERSION:-}"
+_ORIG_ENV_MODULE_PREFIX="${GOTOOLS_MODULE_PREFIX:-}"
 
 usage() {
     cat <<EOF
@@ -24,10 +31,9 @@ Usage: $(basename "$0") <command> [arguments]
 
 Commands:
   init [flags]            Bootstrap the project.
-                            --strategy=workspace|isolated|module  (default: $DEFAULT_STRATEGY)
+                            --strategy=unified|split|module  (default: $DEFAULT_STRATEGY)
                             --dir=<tools-dir>                     (default: $DEFAULT_DIR)
                             --go=<version|inherit>                (default: $DEFAULT_GO_VERSION)
-                            --work=true|false                     (default: $DEFAULT_USE_WORK)
                             --prefix=<module-prefix|auto>         (default: auto from root go.mod)
   install [name] <pkg>    Install a new tool.
                             If only <pkg> is given, name is inferred from its basename.
@@ -49,23 +55,23 @@ Commands:
   test <seconds>          Sleep for <seconds> (useful for testing Ctrl-C / signal handling).
 
 Strategies:
-  workspace   One shared tools/go.mod with all tool directives.
-  isolated    Flat files: tools/<name>.mod and tools/<name>.sum per tool.
+  unified     One shared tools/go.mod with all tool directives.
+  split       Flat files: tools/<name>.mod and tools/<name>.sum per tool.
   module      Dedicated subdirectories: tools/<name>/go.mod per tool.
 
 Examples:
-  ./gotools.sh init --strategy=module --dir=tools
-  ./gotools.sh install staticcheck honnef.co/go/tools/cmd/staticcheck@latest
-  ./gotools.sh install golang.org/x/tools/cmd/goimports@latest
-  ./gotools.sh exec goimports -w .
-  ./gotools.sh migrate workspace
-  ./gotools.sh upgrade all
-  ./gotools.sh remove staticcheck goimports
-  ./gotools.sh config
-  ./gotools.sh config GOTOOLS_STRATEGY
-  ./gotools.sh config GOTOOLS_STRATEGY module
-  ./gotools.sh purge
-  ./gotools.sh uninstall
+  gotools.sh init --strategy=module --dir=tools
+  gotools.sh install staticcheck honnef.co/go/tools/cmd/staticcheck@latest
+  gotools.sh install golang.org/x/tools/cmd/goimports@latest
+  gotools.sh exec goimports -w .
+  gotools.sh migrate unified
+  gotools.sh upgrade all
+  gotools.sh remove staticcheck goimports
+  gotools.sh config
+  gotools.sh config GOTOOLS_STRATEGY
+  gotools.sh config GOTOOLS_STRATEGY module
+  gotools.sh purge
+  gotools.sh uninstall
 EOF
     exit 1
 }
@@ -73,26 +79,64 @@ EOF
 # ---------------------------------------------------------------------------
 # Config helpers
 # ---------------------------------------------------------------------------
+_CONFIG_LOADED=false
+
 load_config() {
-    # Save any pre-existing environment variables so they take precedence
-    # over values in the config file.
-    local env_strategy="${GOTOOLS_STRATEGY:-}"
-    local env_dir="${GOTOOLS_DIR:-}"
-    local env_go_version="${GOTOOLS_GO_VERSION:-}"
-    local env_use_work="${GOTOOLS_USE_WORK:-}"
-    local env_module_prefix="${GOTOOLS_MODULE_PREFIX:-}"
+    if [[ "$_CONFIG_LOADED" == "true" ]]; then
+        return
+    fi
 
     if [[ -f "$ENV_FILE" ]]; then
         # shellcheck source=/dev/null
         source "$ENV_FILE"
     fi
 
-    # Environment variables override config file, which overrides defaults.
-    GOTOOLS_STRATEGY="${env_strategy:-${GOTOOLS_STRATEGY:-$DEFAULT_STRATEGY}}"
-    GOTOOLS_DIR="${env_dir:-${GOTOOLS_DIR:-$DEFAULT_DIR}}"
-    GOTOOLS_GO_VERSION="${env_go_version:-${GOTOOLS_GO_VERSION:-$DEFAULT_GO_VERSION}}"
-    GOTOOLS_USE_WORK="${env_use_work:-${GOTOOLS_USE_WORK:-$DEFAULT_USE_WORK}}"
-    GOTOOLS_MODULE_PREFIX="${env_module_prefix:-${GOTOOLS_MODULE_PREFIX:-$DEFAULT_MODULE_PREFIX}}"
+    # Startup env overrides > config file > defaults.
+    GOTOOLS_STRATEGY="${_ORIG_ENV_STRATEGY:-${GOTOOLS_STRATEGY:-$DEFAULT_STRATEGY}}"
+    GOTOOLS_DIR="${_ORIG_ENV_DIR:-${GOTOOLS_DIR:-$DEFAULT_DIR}}"
+    GOTOOLS_GO_VERSION="${_ORIG_ENV_GO_VERSION:-${GOTOOLS_GO_VERSION:-$DEFAULT_GO_VERSION}}"
+    GOTOOLS_MODULE_PREFIX="${_ORIG_ENV_MODULE_PREFIX:-${GOTOOLS_MODULE_PREFIX:-$DEFAULT_MODULE_PREFIX}}"
+    _CONFIG_LOADED=true
+}
+
+reload_config() {
+    _CONFIG_LOADED=false
+    load_config
+}
+
+# detect_strategy <dir>
+#   Inspects the tools directory on disk and returns which strategy it
+#   actually matches: unified, split, module, or empty (unknown).
+detect_strategy() {
+    local dir="${1:-$GOTOOLS_DIR}"
+    [[ -d "$dir" ]] || return 0
+
+    # unified: single go.mod at the tools root with tool directives
+    if [[ -f "$dir/go.mod" ]] && grep -q '^tool ' "$dir/go.mod" 2>/dev/null; then
+        echo "unified"
+        return
+    fi
+
+    # module: subdirectories each containing go.mod
+    local has_subdirs=false
+    for d in "$dir"/*/; do
+        if [[ -d "$d" && -f "$d/go.mod" ]]; then
+            has_subdirs=true
+            break
+        fi
+    done
+    if [[ "$has_subdirs" == "true" ]]; then
+        echo "module"
+        return
+    fi
+
+    # split: flat *.mod files (not go.mod)
+    for f in "$dir"/*.mod; do
+        if [[ -f "$f" && "$(basename "$f")" != "go.mod" ]]; then
+            echo "split"
+            return
+        fi
+    done
 }
 
 resolve_go_version() {
@@ -142,7 +186,7 @@ resolve_module_prefix() {
 
 # tool_module_path [tool_name]
 #   Builds the full module path for a tool go.mod using $GOTOOLS_DIR.
-#   No args:  module path for the tools dir itself (workspace strategy).
+#   No args:  module path for the tools dir itself (unified strategy).
 #   One arg:  module path for a specific tool.
 #
 #   Examples (GOTOOLS_DIR=tools, parent=github.com/user/repo):
@@ -277,10 +321,8 @@ extract_pkg_from_mod() {
 #   Strategy-aware.
 # ---------------------------------------------------------------------------
 extract_tools_with_versions() {
-    load_config
-
     case "$GOTOOLS_STRATEGY" in
-        workspace)
+        unified)
             local modfile="$GOTOOLS_DIR/go.mod"
             [[ -f "$modfile" ]] || return 0
             while IFS= read -r pkg; do
@@ -296,7 +338,7 @@ extract_tools_with_versions() {
             done < <(extract_tools_from_mod "$modfile")
             ;;
 
-        isolated)
+        split)
             for f in "$GOTOOLS_DIR"/*.mod; do
                 [[ -f "$f" ]] || continue
                 local name pkg ver
@@ -338,26 +380,6 @@ extract_tools_with_versions() {
 }
 
 # ---------------------------------------------------------------------------
-# go.work helpers
-# ---------------------------------------------------------------------------
-
-# Ensure go.work exists (init if missing) and run `go work use <path>`.
-ensure_go_work_use() {
-    local use_path="$1"
-    if [[ ! -f "go.work" ]]; then
-        go work init .
-    fi
-    go work use "$use_path"
-}
-
-# Drop a path from go.work if the file exists.
-go_work_drop_use() {
-    local drop_path="$1"
-    if [[ -f "go.work" ]]; then
-        go work edit -dropuse "$drop_path" 2>/dev/null || true
-    fi
-}
-
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -368,13 +390,12 @@ cmd_version() {
 
 # ---- init ----------------------------------------------------------------
 cmd_init() {
-    local strategy=$DEFAULT_STRATEGY dir=$DEFAULT_DIR go_v=$DEFAULT_GO_VERSION work=$DEFAULT_USE_WORK prefix=""
+    local strategy=$DEFAULT_STRATEGY dir=$DEFAULT_DIR go_v=$DEFAULT_GO_VERSION prefix=""
     for arg in "$@"; do
         case $arg in
             --strategy=*) strategy="${arg#*=}" ;;
             --dir=*)      dir="${arg#*=}" ;;
             --go=*)       go_v="${arg#*=}" ;;
-            --work=*)     work="${arg#*=}" ;;
             --prefix=*)   prefix="${arg#*=}" ;;
             *)            echo "❓ Unknown flag: $arg"; usage ;;
         esac
@@ -382,15 +403,14 @@ cmd_init() {
 
     # Validate strategy.
     case "$strategy" in
-        workspace|isolated|module) ;;
-        *) echo "❌ Invalid strategy: $strategy (must be workspace, isolated, or module)" >&2; exit 1 ;;
+        unified|split|module) ;;
+        *) echo "❌ Invalid strategy: $strategy (must be unified, split, or module)" >&2; exit 1 ;;
     esac
 
     cat > "$ENV_FILE" <<EOF
 GOTOOLS_STRATEGY=$strategy
 GOTOOLS_DIR=$dir
 GOTOOLS_GO_VERSION=$go_v
-GOTOOLS_USE_WORK=$work
 GOTOOLS_MODULE_PREFIX=$prefix
 EOF
 
@@ -407,21 +427,29 @@ cmd_sync() {
     load_config
     local target_v
     target_v=$(resolve_go_version)
+
+    local disk_strategy
+    disk_strategy=$(detect_strategy "$GOTOOLS_DIR")
+
+    if [[ -n "$disk_strategy" && "$disk_strategy" != "$GOTOOLS_STRATEGY" ]]; then
+        echo "⚠️  Strategy mismatch: .gotools.env says '$GOTOOLS_STRATEGY' but $GOTOOLS_DIR/ looks like '$disk_strategy'."
+        echo "🔀 Auto-migrating to '$GOTOOLS_STRATEGY'..."
+        cmd_migrate "$GOTOOLS_STRATEGY"
+        return
+    fi
+
     echo "🔄 Syncing (strategy=$GOTOOLS_STRATEGY, go=$target_v, dir=$GOTOOLS_DIR)..."
 
     case "$GOTOOLS_STRATEGY" in
-        workspace)
+        unified)
             mkdir -p "$GOTOOLS_DIR"
             if [[ ! -f "$GOTOOLS_DIR/go.mod" ]]; then
                 (cd "$GOTOOLS_DIR" && go mod init "$(tool_module_path)")
             fi
             (cd "$GOTOOLS_DIR" && go mod edit -go="$target_v" && go mod tidy)
-            if [[ "$GOTOOLS_USE_WORK" == "true" ]]; then
-                ensure_go_work_use "$GOTOOLS_DIR"
-            fi
             ;;
 
-        isolated)
+        split)
             mkdir -p "$GOTOOLS_DIR"
             for f in "$GOTOOLS_DIR"/*.mod; do
                 [[ -f "$f" ]] || continue
@@ -443,16 +471,6 @@ cmd_sync() {
                 echo "  ↻ $name"
                 (cd "$d" && go mod edit -go="$target_v" && go mod tidy)
             done
-            if [[ "$GOTOOLS_USE_WORK" == "true" ]]; then
-                if [[ ! -f "go.work" ]]; then
-                    go work init .
-                fi
-                for d in "$GOTOOLS_DIR"/*/; do
-                    [[ -d "$d" ]] || continue
-                    [[ -f "$d/go.mod" ]] || continue
-                    go work use "$d"
-                done
-            fi
             ;;
 
         *)
@@ -487,18 +505,15 @@ cmd_install() {
     echo "📦 Installing $name ($pkg) [strategy=$GOTOOLS_STRATEGY]..."
 
     case "$GOTOOLS_STRATEGY" in
-        workspace)
+        unified)
             mkdir -p "$GOTOOLS_DIR"
             if [[ ! -f "$GOTOOLS_DIR/go.mod" ]]; then
                 (cd "$GOTOOLS_DIR" && go mod init "$(tool_module_path)" && go mod edit -go="$target_v")
             fi
             (cd "$GOTOOLS_DIR" && go get -tool "$pkg")
-            if [[ "$GOTOOLS_USE_WORK" == "true" ]]; then
-                ensure_go_work_use "$GOTOOLS_DIR"
-            fi
             ;;
 
-        isolated)
+        split)
             mkdir -p "$GOTOOLS_DIR"
             local modfile="${name}.mod"
             if [[ ! -f "$GOTOOLS_DIR/$modfile" ]]; then
@@ -519,9 +534,6 @@ MODEOF
                 (cd "$GOTOOLS_DIR/$name" && go mod init "$(tool_module_path "$name")" && go mod edit -go="$target_v")
             fi
             (cd "$GOTOOLS_DIR/$name" && go get -tool "$pkg")
-            if [[ "$GOTOOLS_USE_WORK" == "true" ]]; then
-                ensure_go_work_use "$GOTOOLS_DIR/$name"
-            fi
             ;;
 
         *)
@@ -540,7 +552,7 @@ cmd_exec() {
     shift
 
     case "$GOTOOLS_STRATEGY" in
-        workspace)
+        unified)
             if [[ ! -f "$GOTOOLS_DIR/go.mod" ]]; then
                 echo "❌ Error: No $GOTOOLS_DIR/go.mod found. Run 'init' first." >&2
                 exit 1
@@ -548,7 +560,7 @@ cmd_exec() {
             (cd "$GOTOOLS_DIR" && exec go tool "$tool_name" "$@")
             ;;
 
-        isolated)
+        split)
             local mod_file="$GOTOOLS_DIR/${tool_name}.mod"
             if [[ ! -f "$mod_file" ]]; then
                 echo "❌ Error: Tool '$tool_name' not found ($mod_file missing). Run 'install' first." >&2
@@ -579,7 +591,7 @@ cmd_list() {
     printf "  %-18s %-10s %-8s %-30s %s\n" "----" "--------" "--" "-------" "---------------"
 
     case "$GOTOOLS_STRATEGY" in
-        workspace)
+        unified)
             local modfile="$GOTOOLS_DIR/go.mod"
             if [[ -f "$modfile" ]]; then
                 local go_ver rel_mod
@@ -590,12 +602,12 @@ cmd_list() {
                     local name ver
                     name=$(basename "$pkg")
                     ver=$(extract_version_for_pkg "$modfile" "$pkg")
-                    printf "  %-18s %-10s %-8s %-30s %s\n" "$name" "workspace" "${go_ver:-?}" "$rel_mod" "${pkg}@${ver:-unknown}"
+                    printf "  %-18s %-10s %-8s %-30s %s\n" "$name" "unified" "${go_ver:-?}" "$rel_mod" "${pkg}@${ver:-unknown}"
                 done < <(extract_tools_from_mod "$modfile")
             fi
             ;;
 
-        isolated)
+        split)
             for f in "$GOTOOLS_DIR"/*.mod; do
                 [[ -f "$f" ]] || continue
                 local name pkg ver go_ver rel_mod
@@ -605,7 +617,7 @@ cmd_list() {
                 ver=$(extract_version_for_pkg "$f" "$pkg")
                 go_ver=$(extract_go_version_from_mod "$f")
                 rel_mod=$(relative_path "$f")
-                printf "  %-18s %-10s %-8s %-30s %s\n" "$name" "isolated" "${go_ver:-?}" "$rel_mod" "${pkg}@${ver:-unknown}"
+                printf "  %-18s %-10s %-8s %-30s %s\n" "$name" "split" "${go_ver:-?}" "$rel_mod" "${pkg}@${ver:-unknown}"
             done
             ;;
 
@@ -644,7 +656,7 @@ cmd_info() {
     local modfile="" pkg="" ver="" go_ver="" strategy="$GOTOOLS_STRATEGY"
 
     case "$GOTOOLS_STRATEGY" in
-        workspace)
+        unified)
             modfile="$GOTOOLS_DIR/go.mod"
             if [[ ! -f "$modfile" ]]; then
                 echo "❌ No $modfile found. Run 'init' first." >&2
@@ -665,7 +677,7 @@ cmd_info() {
             go_ver=$(extract_go_version_from_mod "$modfile")
             ;;
 
-        isolated)
+        split)
             modfile="$GOTOOLS_DIR/${tool_name}.mod"
             if [[ ! -f "$modfile" ]]; then
                 echo "❌ Tool '$tool_name' not found ($modfile missing)." >&2
@@ -718,11 +730,11 @@ cmd_upgrade() {
 
     if [[ "$1" == "all" ]]; then
         case "$GOTOOLS_STRATEGY" in
-            workspace)
+            unified)
                 local modfile="$GOTOOLS_DIR/go.mod"
                 [[ -f "$modfile" ]] && mapfile -t targets < <(extract_tools_from_mod "$modfile")
                 ;;
-            isolated)
+            split)
                 for f in "$GOTOOLS_DIR"/*.mod; do
                     [[ -f "$f" ]] && targets+=("$(basename "$f" .mod)")
                 done
@@ -745,11 +757,11 @@ cmd_upgrade() {
     for t in "${targets[@]}"; do
         echo "🚀 Upgrading $t..."
         case "$GOTOOLS_STRATEGY" in
-            workspace)
+            unified)
                 # $t here is the full package path from the tool directive.
                 (cd "$GOTOOLS_DIR" && go get -tool "${t}@latest")
                 ;;
-            isolated)
+            split)
                 local pkg
                 pkg=$(extract_pkg_from_mod "$GOTOOLS_DIR/$t.mod")
                 if [[ -n "$pkg" ]]; then
@@ -784,7 +796,7 @@ cmd_remove() {
     for name in "$@"; do
         echo "🗑️  Removing $name..."
         case "$GOTOOLS_STRATEGY" in
-            workspace)
+            unified)
                 local modfile="$GOTOOLS_DIR/go.mod"
                 if [[ -f "$modfile" ]]; then
                     # Find the full pkg path matching the tool name.
@@ -803,7 +815,7 @@ cmd_remove() {
                 fi
                 ;;
 
-            isolated)
+            split)
                 if [[ -f "$GOTOOLS_DIR/$name.mod" ]]; then
                     rm -f "$GOTOOLS_DIR/$name.mod" "$GOTOOLS_DIR/$name.sum"
                     echo "  ✅ Removed $name.mod / $name.sum"
@@ -815,7 +827,6 @@ cmd_remove() {
             module)
                 if [[ -d "$GOTOOLS_DIR/$name" ]]; then
                     rm -rf "${GOTOOLS_DIR:?}/${name:?}"
-                    go_work_drop_use "$GOTOOLS_DIR/$name"
                     echo "  ✅ Removed $GOTOOLS_DIR/$name/"
                 else
                     echo "  ⚠️  $GOTOOLS_DIR/$name/ not found."
@@ -833,21 +844,24 @@ cmd_remove() {
 # ---- migrate -------------------------------------------------------------
 cmd_migrate() {
     if [[ $# -eq 0 ]]; then
-        echo "❌ Usage: $(basename "$0") migrate <workspace|isolated|module>" >&2
+        echo "❌ Usage: $(basename "$0") migrate <unified|split|module>" >&2
         exit 1
     fi
 
     local target_strategy="$1"
 
-    # Validate target strategy.
     case "$target_strategy" in
-        workspace|isolated|module) ;;
-        *) echo "❌ Invalid strategy: $target_strategy (must be workspace, isolated, or module)" >&2; exit 1 ;;
+        unified|split|module) ;;
+        *) echo "❌ Invalid strategy: $target_strategy (must be unified, split, or module)" >&2; exit 1 ;;
     esac
 
     load_config
 
-    local current_strategy="$GOTOOLS_STRATEGY"
+    # Use the on-disk structure as the source of truth for what we're
+    # migrating *from*, not the config file (which may already be updated).
+    local current_strategy
+    current_strategy=$(detect_strategy "$GOTOOLS_DIR")
+    current_strategy="${current_strategy:-$GOTOOLS_STRATEGY}"
 
     if [[ "$current_strategy" == "$target_strategy" ]]; then
         echo "ℹ️  Already using strategy '$target_strategy'. Nothing to do."
@@ -856,7 +870,8 @@ cmd_migrate() {
 
     echo "🔀 Migrating from '$current_strategy' to '$target_strategy'..."
 
-    # 1. Extract the list of tools with their pinned versions.
+    # 1. Read the tools using the on-disk strategy, not the configured one.
+    GOTOOLS_STRATEGY="$current_strategy"
     local tool_list
     tool_list=$(extract_tools_with_versions)
 
@@ -876,47 +891,31 @@ cmd_migrate() {
     # 3. Wipe old tools directory structure.
     echo "🧹 Cleaning old tools directory ($GOTOOLS_DIR)..."
 
-    # For workspace strategy, also drop from go.work if applicable.
-    if [[ -f "go.work" ]]; then
-        case "$current_strategy" in
-            workspace)
-                go work edit -dropuse "$GOTOOLS_DIR" 2>/dev/null || true
-                ;;
-            module)
-                for d in "$GOTOOLS_DIR"/*/; do
-                    [[ -d "$d" ]] || continue
-                    go work edit -dropuse "$d" 2>/dev/null || true
-                done
-                ;;
-        esac
-    fi
-
     rm -rf "${GOTOOLS_DIR:?}"
     mkdir -p "$GOTOOLS_DIR"
 
-    # 4. Update .gotools.env with new strategy.
+    # 4. Update .gotools.env and force the live variable so that
+    #    subsequent load_config / cmd_install calls in this process
+    #    use the target strategy (not the old one).
     sed -i.bak "s/^GOTOOLS_STRATEGY=.*/GOTOOLS_STRATEGY=$target_strategy/" "$ENV_FILE"
     rm -f "$ENV_FILE.bak"
 
-    # 5. Reload config with new strategy.
-    load_config
+    # Force the live state to the target so cmd_install uses it.
+    GOTOOLS_STRATEGY="$target_strategy"
+    _CONFIG_LOADED=true
 
-    # 6. Re-initialize the new strategy structure.
+    # 5. Re-initialize the new strategy structure.
     echo "🔧 Initializing new strategy ($target_strategy)..."
 
     case "$target_strategy" in
-        workspace)
+        unified)
             (cd "$GOTOOLS_DIR" && go mod init "$(tool_module_path)" && go mod edit -go="$go_ver")
-            if [[ "$GOTOOLS_USE_WORK" == "true" ]]; then
-                ensure_go_work_use "$GOTOOLS_DIR"
-            fi
             ;;
-        isolated|module)
-            # Directories/files created per-tool below.
+        split|module)
             ;;
     esac
 
-    # 7. Re-install all tools at their exact pinned versions.
+    # 6. Re-install all tools at their exact pinned versions.
     if [[ -n "$tool_list" ]]; then
         echo "📦 Re-installing tools under '$target_strategy' strategy..."
         while IFS=' ' read -r name pkg_at_version; do
@@ -940,21 +939,6 @@ cmd_purge() {
     if [[ "$confirmation" != "YES" ]]; then
         echo "❌ Purge cancelled."
         return 0
-    fi
-
-    # Clean up go.work entries.
-    if [[ -f "go.work" ]]; then
-        case "$GOTOOLS_STRATEGY" in
-            workspace)
-                go work edit -dropuse "$GOTOOLS_DIR" 2>/dev/null || true
-                ;;
-            module)
-                for d in "$GOTOOLS_DIR"/*/; do
-                    [[ -d "$d" ]] || continue
-                    go work edit -dropuse "$d" 2>/dev/null || true
-                done
-                ;;
-        esac
     fi
 
     rm -rf "${GOTOOLS_DIR:?}" "${ENV_FILE:?}"
@@ -994,9 +978,9 @@ cmd_config() {
 
     # Validate key name.
     case "$key" in
-        GOTOOLS_STRATEGY|GOTOOLS_DIR|GOTOOLS_GO_VERSION|GOTOOLS_USE_WORK|GOTOOLS_MODULE_PREFIX) ;;
+        GOTOOLS_STRATEGY|GOTOOLS_DIR|GOTOOLS_GO_VERSION|GOTOOLS_MODULE_PREFIX) ;;
         *) echo "❌ Unknown config key: $key" >&2
-           echo "   Valid keys: GOTOOLS_STRATEGY, GOTOOLS_DIR, GOTOOLS_GO_VERSION, GOTOOLS_USE_WORK, GOTOOLS_MODULE_PREFIX" >&2
+           echo "   Valid keys: GOTOOLS_STRATEGY, GOTOOLS_DIR, GOTOOLS_GO_VERSION, GOTOOLS_MODULE_PREFIX" >&2
            return 1 ;;
     esac
 
@@ -1021,8 +1005,8 @@ cmd_config() {
     # Validate value for strategy key.
     if [[ "$key" == "GOTOOLS_STRATEGY" ]]; then
         case "$value" in
-            workspace|isolated|module) ;;
-            *) echo "❌ Invalid strategy: $value (must be workspace, isolated, or module)" >&2; return 1 ;;
+            unified|split|module) ;;
+            *) echo "❌ Invalid strategy: $value (must be unified, split, or module)" >&2; return 1 ;;
         esac
     fi
 
