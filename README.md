@@ -3,23 +3,17 @@
 
 # gotools.sh
 
-A robust, strategy-driven bash script to manage Go build
-tools (like `golangci-lint`, `task`, or `mockgen`) using
-Go 1.24+ `tool` directives.
+A bash script to manage Go build tools using Go 1.24+ `tool` directives.
 
 ## Why does this exist?
 
-Prior to Go 1.24, managing tool versions meant tracking
-them in a dummy `tools.go` file. With Go 1.24, you can
-track tools directly in `go.mod`. However, installing
-tools directly into your project's main `go.mod` pollutes
-your dependency graph.
+Prior to Go 1.24, managing tool versions meant tracking them in a dummy `tools.go` file.
+With Go 1.24, you can track tools directly in `go.mod`. However, installing tools directly
+into your project's main `go.mod` pollutes your dependency graph which is not ideal as tools
+tend to not be part of production code.
 
-`gotools.sh` solves this by automating the creation and
-management of a separate `tools/` environment. It provides
-different "strategies" to isolate tool dependencies,
-preventing version conflicts and ensuring your CI pipeline
-runs the exact same binaries as your local machine.
+`gotools.sh` provides different "strategies" to isolate tool dependencies, preventing version
+conflicts and ensuring your CI pipeline runs the exact same binaries as your local machine.
 
 ---
 
@@ -27,8 +21,8 @@ runs the exact same binaries as your local machine.
 
 ### The Risks of Source-Based Tool Installation
 
-Installing tools via `go get -tool` compiles the binary
-locally from source. You must be aware of the following:
+Installing tools via `go get -tool` compiles the binary locally from source.
+You must be aware of the following:
 
 1. **Local Go Version Dependency:** The compiled tool's
    behavior depends on the Go version installed on your
@@ -81,8 +75,7 @@ safety.
 ### Option 1: Go binary
 
 If you have Go installed, you can install the `gotools`
-binary directly. It embeds the shell script and handles
-signal forwarding and graceful shutdown.
+binary directly.
 
 ```bash
 go install github.com/piusalfred/gotools/cmd/gotools@latest
@@ -109,12 +102,12 @@ curl -fsSL \
 **Install a specific version:**
 
 Set the `VERSION` environment variable to a release tag.
-Both `v0.2.0` and `0.2.0` are accepted:
+Both `v0.2.1` and `0.2.1` are accepted:
 
 ```bash
 curl -fsSL \
   https://raw.githubusercontent.com/piusalfred/gotools.sh/main/install.sh \
-  | VERSION=v0.2.0 bash
+  | VERSION=v0.2.1 bash
 ```
 
 When `VERSION` is omitted or set to `latest`, the
