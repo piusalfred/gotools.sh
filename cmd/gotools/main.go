@@ -61,11 +61,11 @@ func main() {
 
 // Run executes the embedded gotools.sh script in a child bash process.
 //
-// Signal handling: the child is placed in its own process group (Setpgid)
-// so kernel-delivered signals don't race with our context cancellation.
-// On context cancel the Cancel func sends SIGTERM to the whole process
-// group, giving the shell script up to WaitDelay (5 s) to clean up
-// before Go escalates to SIGKILL.
+// Signal handling: the child shares the parent's process group so that
+// interactive terminal I/O (e.g. read prompts in purge/uninstall) works
+// correctly. On context cancel the Cancel func sends SIGTERM to the
+// child process, giving it up to WaitDelay (3 s) to clean up before
+// Go escalates to SIGKILL.
 func Run(ctx context.Context, args []string) error {
 	script := []string{"-c", gotools.SCRIPT, "gotools"}
 	if len(args) > 1 {
@@ -76,13 +76,12 @@ func Run(ctx context.Context, args []string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.WaitDelay = 5 * time.Second
+	cmd.WaitDelay = 3 * time.Second
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil
 		}
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+		return cmd.Process.Signal(syscall.SIGTERM)
 	}
 
 	if err := cmd.Run(); err != nil {
